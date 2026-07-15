@@ -10,12 +10,52 @@ on:
       end_page:
         description: "Last page number to build (inclusive)"
         required: true
-        default: "3"
+        default: "604"
+      num_chunks:
+        description: "How many parallel jobs to split the range into"
+        required: true
+        default: "20"
 
 jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          python3 - <<EOF
+          import json, math, os
+
+          start = int("${{ github.event.inputs.start_page }}")
+          end = int("${{ github.event.inputs.end_page }}")
+          num_chunks = int("${{ github.event.inputs.num_chunks }}")
+
+          total = end - start + 1
+          chunk_size = math.ceil(total / num_chunks)
+
+          chunks = []
+          p = start
+          while p <= end:
+              chunk_end = min(p + chunk_size - 1, end)
+              chunks.append({"start_page": str(p), "end_page": str(chunk_end)})
+              p = chunk_end + 1
+
+          matrix = {"include": chunks}
+          print(f"Generated {len(chunks)} chunks: {chunks}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+          EOF
+
   build:
+    needs: generate-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -31,7 +71,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests boto3
 
-      - name: Run video build script
+      - name: Run video build script for this chunk
         env:
           QF_CLIENT_ID: ${{ secrets.QF_CLIENT_ID }}
           QF_CLIENT_SECRET: ${{ secrets.QF_CLIENT_SECRET }}
@@ -39,6 +79,6 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: quran-tiktok-videos
-          START_PAGE: ${{ github.event.inputs.start_page }}
-          END_PAGE: ${{ github.event.inputs.end_page }}
+          START_PAGE: ${{ matrix.start_page }}
+          END_PAGE: ${{ matrix.end_page }}
         run: python scripts/build_videos.py
